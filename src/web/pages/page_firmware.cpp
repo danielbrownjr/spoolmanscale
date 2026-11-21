@@ -819,6 +819,15 @@ static void routesTail(WebServer &srv) {
         logSD("OTA: upload aborted by the client");
         if (lbl_ota_status) lv_label_set_text(lbl_ota_status, T(STR_OTA_FAIL));
       } else if (upload.status == UPLOAD_FILE_WRITE) {
+        // Expired authorization must stop writing before the next chunk.
+        if (!webAllowed(srv, GATE_MAINT)) {
+          Update.abort();
+          ota_upload_active = false;
+          failed = true;
+          otaGithubOverlayHide();
+          logSD("OTA: upload authorization expired; aborted");
+          return;
+        }
         if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
           logSDf("OTA: write failed after %u bytes, error %u",
                  (unsigned)ota_upload_done, (unsigned)Update.getError());
@@ -844,6 +853,14 @@ static void routesTail(WebServer &srv) {
         }
       } else if (upload.status == UPLOAD_FILE_END) {
         ota_upload_active = false;
+        // Revalidate at the activation boundary, not only at upload start.
+        if (!webAllowed(srv, GATE_MAINT)) {
+          Update.abort();
+          otaGithubOverlayHide();
+          failed = true;
+          logSD("OTA: upload authorization expired before commit");
+          return;
+        }
         // end(true), because the image size is only known now: the multipart
         // envelope hid it from begin(). The library still checks the image
         // header before it commits.
