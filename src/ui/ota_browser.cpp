@@ -217,6 +217,8 @@ void buildOtaBrowserScreen() {
         // Back does not close the server. Whether it listens is the master
         // switch's business, and closing it here behind that switch's back
         // is exactly what used to leave port 80 dead until the next reboot.
+        // Close the maintenance grant when leaving the firmware screen.
+        if (isFirmwareContext()) webSetMaintenanceEnabled(false);
         // Back goes where the user came from, not always to the update menu.
         switch (s_web_ctx) {
           case WEB_CTX_BACKEND: show_backend_pending         = true; break;
