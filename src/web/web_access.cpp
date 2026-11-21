@@ -26,11 +26,20 @@ static void sendTinyPage(WebServer &srv, int code, const char *title, const Stri
 static bool master_on      = true;
 static bool config_on      = false;
 static bool maintenance_on = false;
+// A physical maintenance grant is volatile and expires after ten minutes.
+static constexpr uint32_t MAINTENANCE_WINDOW_MS = 10UL * 60UL * 1000UL;
+static uint32_t maintenance_opened_ms = 0;
 static char s_pass[WEB_PASS_MAX + 1] = "";
 
 bool webMasterEnabled()      { return master_on; }
 bool webConfigEnabled()      { return config_on; }
-bool webMaintenanceEnabled() { return maintenance_on; }
+bool webMaintenanceEnabled() {
+  if (maintenance_on &&
+      (uint32_t)(millis() - maintenance_opened_ms) >= MAINTENANCE_WINDOW_MS) {
+    maintenance_on = false;
+  }
+  return maintenance_on;
+}
 bool webHasPassword()        { return s_pass[0] != '\0'; }
 
 // Keeps the digits, drops the rest, and treats anything shorter than the
@@ -53,7 +62,9 @@ void webSetPassword(const char *digits) {
 void webAccessLoad() {
   master_on      = prefsGetBool("web_master", true);
   config_on      = prefsGetBool("web_config", false);
-  maintenance_on = prefsGetBool("web_maint",  false);
+  // A previously opened firmware maintenance window must not survive reset.
+  maintenance_on = false;
+  maintenance_opened_ms = 0;
   passFromString(prefsGetString("web_pass", "").c_str());
 }
 
@@ -64,6 +75,7 @@ void webAccessLoad() {
 // the moment the web screen closed the server behind its back.
 void webSetMasterEnabled(bool on) {
   master_on = on;
+  if (!on) maintenance_on = false;
   prefsPutBool("web_master", on);
 }
 
@@ -74,7 +86,8 @@ void webSetConfigEnabled(bool on) {
 
 void webSetMaintenanceEnabled(bool on) {
   maintenance_on = on;
-  prefsPutBool("web_maint", on);
+  if (on) maintenance_opened_ms = millis();
+  // Do not persist a temporary physical authorization.
 }
 
 bool webGateOpen(WebGate g) {
@@ -82,7 +95,7 @@ bool webGateOpen(WebGate g) {
     case GATE_ALWAYS: return true;
     case GATE_OPEN:   return master_on;
     case GATE_CONFIG: return master_on && config_on;
-    case GATE_MAINT:  return master_on && maintenance_on;
+    case GATE_MAINT:  return master_on && webMaintenanceEnabled();
   }
   return false;
 }
@@ -119,6 +132,7 @@ enum WebVerdict : uint8_t {
   WEB_BAD_HOST,      // Host header is not one of our names
   WEB_BAD_ORIGIN,    // a browser's cross-site POST
   WEB_GATE_SHUT,     // the switch on the device is off
+  WEB_NEED_PIN,      // firmware writes require a configured PIN
   WEB_NEED_AUTH      // password set, none or a wrong one sent
 };
 
@@ -255,6 +269,11 @@ static WebVerdict verdict(WebServer &srv, WebGate g) {
     return WEB_BAD_ORIGIN;
   }
   if (!webGateOpen(g)) return WEB_GATE_SHUT;
+  // Reject firmware-changing operations with the factory-default empty PIN.
+  // HTTP Basic remains vulnerable to interception on an untrusted LAN.
+  const String path = srv.uri();
+  const bool firmware_write = (path == "/update" || path == "/api/ota/install");
+  if (firmware_write && !webHasPassword()) return WEB_NEED_PIN;
   if (g >= GATE_CONFIG && webHasPassword() && !passwordOk(srv)) return WEB_NEED_AUTH;
   return WEB_OK;
 }
@@ -302,6 +321,11 @@ bool webRequire(WebServer &srv, WebGate g, const char *what) {
       // see in a console.
       if (api) srv.send(403, "text/plain", T(STR_W_OFF_BODY));
       else     webSendDisabled(srv, what, T(STR_W_OFF_PATH));
+      return false;
+    case WEB_NEED_PIN:
+      logRefusal(srv, "firmware PIN not configured");
+      srv.send(403, "text/plain; charset=utf-8",
+               "Set a web PIN on the device before installing firmware.");
       return false;
     case WEB_NEED_AUTH:
       // The browser turns this into its own password prompt on a page, and
